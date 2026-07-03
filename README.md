@@ -1,334 +1,290 @@
-# bridge-mta
+# get-hub — signed, fetch-only HTTPS LLM-chat gateway
 
-**One HTTPS URL that gives a fetch-only LLM chat access to your private APIs.**
+**One LAN HTTPS URL that gives a fetch-only LLM chat controlled, signed access to your
+private APIs — running on any box with Node.js. Zero dependencies.**
 
-A browser LLM chat can often do exactly one thing to the outside world: open a URL
-(a built-in "web fetch"). No tool-calling, no MCP, no plugins. `bridge-mta` turns
-that single capability into a controlled gateway to your private tools and data.
+get-hub is a small, self-contained **GET/HEAD-only** gateway. A client (typically an
+LLM that can only issue HTTP GETs) calls `?op=<name>&…`; the kernel authenticates the
+request with an HMAC **door-key**, dispatches to the first matching **module**, and the
+module injects a server-side credential the client never sees before forwarding the
+call through the kernel's single outbound-HTTPS proxy.
 
-The bridge is a tiny dispatcher. The client GETs one URL, the bridge routes it by
-an `op=` parameter, and the load-bearing op — `do` — is a signed outgoing HTTPS
-proxy with a host allowlist that injects server-side credentials the client never
-sees. Keys are short-lived (~1h) and rotate through a 2-button Telegram bot.
+The security-bearing core is `kernel.mjs`. Behaviour is composed from auto-loaded
+`modules/*.mjs` files. `server.mjs` is BOTH the HTTP server and the operator CLI.
 
-> **Design principle:** build for the weakest client — a chat that can only open a
-> link — and it works everywhere. That is why everything is GET-only and URL-only.
-
-There are **three deployments** (pick one; see §3):
-- **Universal Linux server** (`server-node/`) — **start here.** A zero-dependency
-  Node 18+ port of the full mechanism (HMAC, `op=do`, host allowlist, GitHub JWT).
-  Runs on any Linux with Node, no Cloudflare account, no PHP host. Keys are minted
-  by a CLI (`node server.mjs issue`) instead of the Telegram bot, so an agent can
-  bootstrap it blind. **→ [`server-node/README.md`](server-node/README.md)**
-- **Cloudflare Worker** (`src/index.js`) — self-sufficient: HMAC auth, KV key
-  rotation, on-edge GitHub App JWT minting. Downside: `*.workers.dev` is blocked
-  inside some LLM sandboxes.
-- **PHP port** (`php/bridge.php`) — a weaker token-mode variant for any PHP host on
-  a normal domain. Downside: static access key, no HMAC, no JWT, no bot. This is
-  the variant proven end-to-end from a locked-down web-fetch-only agent.
+For the full contract and threat model, see [`../server-node/SPEC.md`](../server-node/SPEC.md).
 
 ---
 
-## Table of contents
-1. [Overview — what & why](#1-overview)
-2. [Threat model & security posture](#2-threat-model)
-3. [Which deployment to pick](#3-which-deployment)
-4. [Prerequisites](#4-prerequisites)
-5. [Secrets & config](#5-secrets--config)
-6. [GitHub App walkthrough (optional plug)](#6-github-app)
-7. [Deploy A — Cloudflare Worker](#7-deploy-a-worker)
-8. [Telegram bot wiring (setWebhook)](#8-telegram-wiring)
-9. [Deploy B — PHP port](#9-deploy-b-php)
-10. [Activation & key lifecycle](#10-activation--lifecycle)
-11. [Auth spec (canonical signing)](#11-auth-spec)
-12. [`op=do` parameter reference](#12-op-do-reference)
-13. [Extending the bridge](#13-extending)
-14. [Agent usage prompt](#14-agent-prompt)
-15. [Smoke test](#15-smoke-test)
-16. [Troubleshooting](#16-troubleshooting) · [License](#license)
+## What it is
+
+- **Fetch-only.** Only `GET` and `HEAD` reach the kernel; every other method is
+  `405 method_not_allowed`. A plain web-fetch chat is a first-class client.
+- **Signed.** Protected ops require the **door-key**: either a full HMAC-SHA256
+  signature (`sig`/`ts`/`nonce`) or a degraded `key=<door-key>` form for clients that
+  cannot compute an HMAC.
+- **Zero dependency.** Node ≥ 18 built-ins only (`node:http`, `node:crypto`,
+  `node:https`, `node:dns`, `node:child_process`, …). No `npm install`.
+- **Kernel-centred security.** Modules carry ZERO per-service policy. Every clamp
+  — auth, SSRF/proxy guards, exec RCE guards, secret scrubbing — lives in the kernel,
+  in three generic primitives (`core.proxy`, `core.exec`, `core.store`). A module only:
+  `match` → inject its env secret → call a `core.*` primitive.
+- **ASLEEP / ACTIVE.** With no door-key minted the bridge is **ASLEEP**: public ops
+  answer, protected ops are rejected. `node server.mjs issue` mints a key → **ACTIVE**.
 
 ---
 
-## 1. Overview
+## Requirements
 
-The bridge exposes an `OPS` registry keyed by `op=`:
+- A host with **Node.js ≥ 18** (`node --version`). Nothing else — zero npm deps.
+- Outbound HTTPS from that host to the APIs you want to reach (the proxy allowlist).
+- No secret is required to prove the mechanism works. GitHub / Telegram credentials are
+  **optional** add-ons; the bridge boots and serves public + `fetch`/`hash`/`secure_echo`
+  ops with no credential at all.
 
-| op | auth | purpose |
-|----|------|---------|
-| `ping` `info` `echo` `ops` | public | health / edge info / registry list |
-| `secure_echo` | signed | proves your signature works |
-| **`do`** | signed | **outgoing HTTPS proxy** — the actual mechanism |
+---
 
-`op=do` fetches a target URL on your behalf and returns the response. It enforces a
-host allowlist (SSRF guard), https-only, `redirect: manual`, a 10s timeout, and a
-100 KB response cap. When the target is `api.github.com` and the client did not send
-its own `Authorization`, the Worker injects a GitHub **installation token** pulled
-from KV — the client never sees it.
-
-Empty KV = **"secure idle"**: signed ops return `401 no_secret_server` until you
-press ⚡ in the Telegram bot. Public ops always work.
-
-## 2. Threat model
-
-Read this before deploying. The bridge hands a remote LLM real access.
-
-- **Server-side credential injection.** On the Worker the GitHub token lives only in
-  KV and never returns to the client. Keep it that way for any credential you add.
-- **SSRF guard.** `op=do` only reaches hosts in `ALLOW_HOSTS`. Never widen this to a
-  wildcard — that turns the bridge into an open proxy. Keep https-only and
-  `redirect: manual`.
-- **`key=` / `gh=` in the URL is a deliberate weakness.** The token-mode path (and
-  the PHP port) put a live secret in the query string, so it leaks into browser
-  history, server logs, and `Referer`, and has no anti-replay. It exists only so
-  GET-only clients that cannot compute an HMAC can still authenticate. Mitigate with
-  **short TTL** and the **💀 kill** button. Prefer the full HMAC path when the client
-  can sign.
-- **Blast radius.** Point any injected credential at a **throwaway / least-privilege**
-  scope, not your real data. If you use the GitHub plug, give the App the minimum
-  permissions and the fewest repos possible — a token that can write to all your
-  repos in the hands of an LLM is a large risk.
-- **Never commit secrets.** Real values go into Worker secrets / `php/config.php`
-  (gitignored), never into tracked files.
-
-## 3. Which deployment
-
-| | Cloudflare Worker | PHP port |
-|-|-------------------|----------|
-| Auth | HMAC-SHA256 **or** `key=` | `key=` only |
-| Key rotation | Telegram bot + KV, ~1h TTL | manual / per-request `gh=` |
-| GitHub token | minted on-edge from App PEM | client passes `gh=` (or file fallback) |
-| Reachable from LLM sandboxes | `*.workers.dev` sometimes **blocked** | yes, on a normal domain |
-| Honest upstream status | no (returns raw status in body) | yes (`ok` = 2xx + reason) |
-
-**Rule of thumb:** use the **Worker** for the full mechanism; add the **PHP port** on
-a normal domain when your target LLM sandbox blocks `*.workers.dev`.
-
-## 4. Prerequisites
-
-**Worker:** a Cloudflare account; `npm i -g wrangler`; `wrangler login`.
-A KV namespace (created in §7). A Telegram bot token from **@BotFather** and your
-numeric Telegram id (message **@userinfobot**). Optionally a GitHub App (§6).
-
-**PHP port:** any PHP 8.x host with `curl` (a normal HTTPS domain). No Cloudflare,
-no bot, no KV.
-
-## 5. Secrets & config
-
-Copy `.env.example` and read the notes there. The Worker reads these as **secrets**
-(via `wrangler secret put`), not from a file.
-
-| name | where | required | how to get |
-|------|-------|----------|-----------|
-| `TG_TOKEN` | Worker secret | bot | @BotFather |
-| `TG_WEBHOOK_SECRET` | Worker secret | bot | `openssl rand -hex 16` (you choose) |
-| `TG_OWNER_IDS` | Worker secret | bot | @userinfobot (numeric ids) |
-| `GITHUB_APP_ID` | Worker secret | GitHub plug | App settings |
-| `GITHUB_INSTALL_ID` | Worker secret | GitHub plug | install URL |
-| `GITHUB_APP_PEM` | Worker secret | GitHub plug | App private key, **PKCS#8** (§6) |
-| `ALLOW_HOSTS` | Worker secret (optional) | no | you choose; defaults in code |
-| `NONCES` KV id | `wrangler.toml` | yes | `wrangler kv namespace create NONCES` |
-| `ACCESS_KEY` | `php/config.php` | PHP | you choose (random) |
-| `GH_TOKEN` | `php/config.php` | PHP (optional) | usually passed per-request via `gh=` |
-
-## 6. GitHub App
-
-Skip this section entirely if you are not using the GitHub plug.
-
-1. GitHub → Settings → Developer settings → **GitHub Apps → New GitHub App**.
-2. Permissions: **least privilege**. For read-only repo contents, set *Repository
-   permissions → Contents → Read-only*. Add write only if you truly need it.
-3. Create, then **Install** it on your account/org and select the **fewest repos**
-   possible (ideally a throwaway workspace repo).
-4. Capture **App ID** (App general page) and **Installation ID** (the install URL is
-   `github.com/settings/installations/<INSTALL_ID>`).
-5. Generate a private key — GitHub gives you **PKCS#1** PEM. The Worker needs
-   **PKCS#8**. Convert:
-   ```bash
-   openssl pkcs8 -topk8 -nocrypt -in app.private-key.pem -out app.pkcs8.pem
-   ```
-6. Store the three values (§7).
-
-## 7. Deploy A — Worker
+## Quickstart
 
 ```bash
-# from the repo root (the Worker lives at the top level: src/, wrangler.toml)
-npm i -g wrangler        # if needed
-wrangler login
+git clone <repo-url>
+cd bridge-endpoint-project/worker/get-hub    # (this folder is self-contained)
 
-# 1. Create the KV namespace and paste its id into wrangler.toml (NONCES binding).
-wrangler kv namespace create NONCES
-#   → copy the printed id → edit wrangler.toml → replace REPLACE_WITH_YOUR_KV_NAMESPACE_ID
+cp .env.example .env
+chmod 600 .env                 # secrets live ONLY here — keep it out of git (I5)
+# edit .env: set BIND to your LAN IP, PORT (default 8787), ALLOW_HOSTS to the hosts you
+# expose, and (optionally) GITHUB_* / TELEGRAM_TOKEN.
 
-# 2. Set the secrets (bot; add the GitHub three only if you use the plug).
-wrangler secret put TG_TOKEN
-wrangler secret put TG_WEBHOOK_SECRET
-wrangler secret put TG_OWNER_IDS
-wrangler secret put GITHUB_APP_ID          # optional
-wrangler secret put GITHUB_INSTALL_ID      # optional
-wrangler secret put GITHUB_APP_PEM < app.pkcs8.pem   # optional; paste PKCS#8
-
-# 3. Deploy.
-wrangler deploy
+node server.mjs issue          # mint the door-key — printed ONCE, copy it now
+                               # (server.mjs loads ./.env itself — no `source .env` needed)
+node server.mjs                # start the server (prints the ASLEEP/ACTIVE banner)
 ```
 
-`wrangler deploy` prints your Worker URL (`https://<name>.<subdomain>.workers.dev`).
-Verify: `curl -A c/1 "https://<worker>/?op=ping"` → `{"ok":true,"pong":true,...}`.
+Both `server.mjs issue` and `server.mjs` (and `kill`/`show`) load `./.env` from the working
+directory themselves, so the CLI picks up `GITHUB_TOKEN` etc. with no `set -a; . ./.env` dance.
+A real environment variable always wins over `.env`.
 
-## 8. Telegram wiring
+The startup banner (PORT here is whatever you set — default 8787):
 
-Without this step the bot receives nothing and ⚡/💀 do nothing.
+```
+get-hub get-hub-1.0.0 on http://127.0.0.1:8787
+  allow_hosts=api.github.com,api.telegram.org  store=./get-hub-store.json
+  modules=echo,fetch,github,hash,info,ops,ping,run,secure_echo,telegram,temp
+  exec=disabled
+  state: ACTIVE — door-key present.
+```
 
-Pick the same `TG_WEBHOOK_SECRET` you set in §7 and register the webhook — the bridge
-checks **both** the URL path and the `X-Telegram-Bot-Api-Secret-Token` header, so
-`secret_token` is mandatory:
+Smoke-test the public ops (no key needed) and then a protected op (`PORT` = your configured port):
 
 ```bash
-curl "https://api.telegram.org/bot<TG_TOKEN>/setWebhook" \
-  --data-urlencode "url=https://<worker>/tg/<TG_WEBHOOK_SECRET>" \
-  --data-urlencode "secret_token=<TG_WEBHOOK_SECRET>"
+PORT=8787
+curl "http://127.0.0.1:$PORT/?op=ping"          # {"ok":true,"pong":true,...}
+curl "http://127.0.0.1:$PORT/?op=info"          # version + allow_hosts + op catalog
+curl "http://127.0.0.1:$PORT/?op=ops"           # op-name index
+
+# protected op WITHOUT a key -> rejected:
+curl "http://127.0.0.1:$PORT/?op=hash&s=hi"     # {"ok":false,"error":"no_sig"}
+
+# protected op WITH the degraded key= form (paste the door-key from `issue`):
+KEY='bridge-...'
+curl "http://127.0.0.1:$PORT/?op=hash&s=hi&key=$KEY"
 ```
 
-Confirm: `curl "https://api.telegram.org/bot<TG_TOKEN>/getWebhookInfo"` — `url` set,
-`pending_update_count` 0. Then open the bot, send `/start`, and you get the ⚡/💀
-keyboard. (One bot = webhook **or** polling, never both.)
+For a persistent LAN deploy on a Raspberry Pi, see [`DEPLOY.md`](DEPLOY.md).
 
-## 9. Deploy B — PHP port
+---
+
+## The door-key + signed request
+
+The **door-key** authorizes *calling* the bridge (the data plane). It is minted by the
+operator CLI (`node server.mjs issue`) and stored — hashed at rest as an opaque value —
+in the JSON store. It is shown **once**, on issue. It NEVER rotates itself: only the
+operator (local CLI, or a whitelisted operator channel) may rotate it (I12).
+
+A protected op accepts the key in one of two forms.
+
+### (a) Degraded `key=` form — for clients that cannot sign
+
+Pass the raw door-key as `key=<door-key>`:
 
 ```bash
-cd php
-cp config.example.php config.php     # set ACCESS_KEY to a random value
-# upload bridge.php + config.php to your PHP host, e.g. https://example.com/bridge.php
+curl "http://127.0.0.1:8787/?op=secure_echo&key=$KEY&hello=world"
+# {"ok":true,"authenticated":true,"params":{"hello":"world"},...}
 ```
 
-- Auth: clients pass `?key=<ACCESS_KEY>`.
-- GitHub token: pass a fresh one per request as `&gh=ghs_...` (installation tokens
-  live ~1h), or set `GH_TOKEN` in `config.php` as a fallback.
-- Add `&format=raw` when the caller is an Exa-backed `web_fetch` — it returns empty
-  for `application/json`, so the bridge sends `text/plain` instead.
-- No JWT minting here: the token is not auto-refreshed.
+The kernel compares `key` to the stored door-key in constant time. This is the form a
+plain web-fetch LLM uses. `key` is stripped from params before the module runs, so it is
+never reflected back.
 
-## 10. Activation & lifecycle
+### (b) Full HMAC signature — for clients that can compute an HMAC
 
-The Worker ships **asleep**: with empty KV, signed ops return `401 no_secret_server`.
+Every signed request carries three extra params:
 
-- **⚡ Issue keys** (Telegram) — mints a fresh Bridge HMAC + a fresh GitHub token,
-  revokes the previous GitHub token, writes both to KV with ~1h TTL. Idempotent:
-  press it again for fresh keys. It replies with one copy-paste block.
-- **💀 Kill keys** — revokes and deletes both immediately; the bridge goes back to
-  sleep.
+| param   | meaning                                                            |
+|---------|-------------------------------------------------------------------|
+| `ts`    | unix seconds; must be within `TS_WINDOW_SEC` (default ±3600 s).    |
+| `nonce` | single-use string, 8–128 chars; replay of a seen nonce is refused.|
+| `sig`   | hex HMAC-SHA256 of the canonical string (below).                  |
 
-Three key **types** are easy to confuse — keep them straight:
-- **Bridge HMAC** (`bridge-...`) — signs Worker requests (or used as `key=`).
-- **PHP ACCESS_KEY** (your `config.php` value) — the PHP port's `key=`.
-- **GitHub token** (`ghs_...`) — injected upstream; never used as `key=`.
-
-**Non-Telegram bootstrap (for automation / agents that cannot press a button):** you
-can populate the HMAC secret directly and activate the signed path without the bot:
-```bash
-wrangler kv key put --binding=NONCES hmac:current "bridge-$(openssl rand -hex 24)" --ttl 3600
-```
-(The GitHub plug still needs the bot's ⚡ or a separate token; this only unlocks
-HMAC-signed `op=do`.)
-
-## 11. Auth spec
-
-Signed requests carry `ts`, `nonce`, `sig` plus the op's params. The signature is
-HMAC-SHA256 (hex) over a canonical string:
+**Canonical string (verified against `kernel.mjs` `canonical()` and `test/discovery.test.mjs`):**
 
 ```
-canonical = "v1" + "\n" + path + "\n" + sorted_urlencoded_params_without_sig
+canonical = "v1" + "\n" + <path> + "\n" + <params>
+
+<path>    = the request path, e.g. "/"
+<params>  = every query param EXCEPT `sig`, each as encodeURIComponent(key)
+            "=" encodeURIComponent(value), the resulting "k=v" strings sorted
+            lexicographically, joined with "&".
+sig       = hex( HMAC_SHA256( door-key, canonical ) )
 ```
 
-- `path` is always `/`.
-- Every param **except `sig`** is `encodeURIComponent`'d on key and value, sorted by
-  key, joined with `&`.
-- `ts` — unix seconds; must be within **±3600 s** of now (1-hour window).
-- `nonce` — random, 8–128 chars; single-use, remembered in KV for anti-replay.
-- Compare is constant-time.
+Notes derived from the code:
 
-> This supersedes the old `BRIDGE_API.md`, which listed a 60 s window and an
-> `env HMAC_SECRET`. The shipped code uses a **3600 s** window and a **KV-only**
-> secret. See `docs/API.md` and `clients/` for working signers.
+- Only `sig` is excluded from the canonical string. `ts`, `nonce`, `op`, and every other
+  param (including `key` if present) ARE part of what is signed.
+- Sorting is by the already-encoded `k=v` pair (`Array.prototype.sort` default order).
+- The signature is a lowercase hex digest.
 
-**Degraded mode:** a GET-only client may instead pass `key=<current Bridge HMAC>`
-directly (no `ts`/`nonce`/`sig`). Read §2 first — this leaks the key into the URL.
+Reference JS that reproduces the server's form exactly (`node:crypto`, zero deps):
 
-## 12. `op=do` reference
-
-`GET /?op=do&t=<target>&m=<method>&p=<payload>&c=<0|1>&h=<headers>` + auth.
-
-| param | meaning |
-|-------|---------|
-| `t` | target URL, **`encodeURIComponent`'d**. A raw `#` becomes a fragment and drops your `sig` → always 401. |
-| `m` | HTTP method (default GET). |
-| `p` | request body, base64url. |
-| `c` | `1` = `p` is `deflate-raw`-compressed (native). |
-| `h` | extra headers, base64url of a JSON object. |
-| `gh` | (PHP only) GitHub token to inject. |
-
-Guards: allowlist (`ALLOW_HOSTS`), https-only, `redirect: manual`, 10 s timeout,
-**100 KB response cap** (large bodies are truncated — use small `per_page` and
-paginate; a big body is *not* an error). On `api.github.com` with no client
-`Authorization`, the Worker injects the KV GitHub token.
-
-## 13. Extending
-
-**Add an op** — extend the `OPS` registry in `src/index.js`:
 ```js
-const OPS = {
-  // ...
-  async my_op(params, env, request) {
-    return ok({ hello: params.name || "world" });
-  },
-};
-// make it public (no signature) by adding to PUBLIC_OPS:
-const PUBLIC_OPS = new Set(["ping", "info", "echo", "ops", "my_op"]);
+import crypto from "node:crypto";
+function sign(doorKey, path, params) {                 // params: {op, ts, nonce, ...}
+  const enc = (s) => encodeURIComponent(String(s));
+  const pairs = Object.entries(params)
+    .filter(([k]) => k !== "sig")
+    .map(([k, v]) => `${enc(k)}=${enc(v)}`)
+    .sort();
+  const canonical = `v1\n${path}\n${pairs.join("&")}`;
+  return crypto.createHmac("sha256", doorKey).update(canonical).digest("hex");
+}
+// then request:  `${path}?` + new URLSearchParams({ ...params, sig }).toString()
 ```
-Then `wrangler deploy`.
 
-**Point at your own API** — set `ALLOW_HOSTS` (secret/env) to your hostnames. This is
-the main knob for reuse. GitHub is just the first plug; per-host credential injection
-for other backends is on the roadmap (see `docs/PROPOSALS.md`).
+`test/discovery.test.mjs` (`signedUrl`) is the canonical worked example — it calls the
+kernel's own `canonical()` + `hmacHex()` and appends `sig`.
 
-## 14. Agent prompt
+**Auth error codes** (HTTP 401 body `error`): `no_sig` (no `sig` and no `key`),
+`no_ts`, `bad_ts`, `ts_expired`, `bad_nonce`, `no_secret_server` (bridge is ASLEEP),
+`bad_sig`, `bad_key`, `replay`.
 
-`docs/AGENT_PROMPT.md` is a ready-to-paste English prompt for a weak, fetch-only LLM:
-it hard-codes anti-flailing rules (don't probe random endpoints, a big body isn't
-empty, stop on `token_expired`), a banned-endpoint list, and the `format=raw` note.
-Weak models burn their ~1h token by flailing without it.
+---
 
-## 15. Smoke test
+## Operator CLI
 
-A blind check that a deploy works — full expected JSON in `docs/SMOKE_TEST.md`:
+`server.mjs` is the control plane — a process on the host IS the operator.
 
-```bash
-B="https://<worker>"; UA="-A smoke/1"
-curl $UA "$B/?op=ping"                 # {"ok":true,"pong":true,...}
-curl $UA "$B/?op=info"                 # colo / country / v:"0.3.0"
-curl $UA "$B/?op=do&t=x"               # 401 no_sig  (do is signed)
-# signed do → api.github.com/zen expecting 200, host-not-allowed → 403, bad-sig → 401
-```
-Use a signer from `clients/` for the signed cases.
+| Command                          | Effect                                                                                           |
+|----------------------------------|--------------------------------------------------------------------------------------------------|
+| `node server.mjs`                | Start the HTTP server. Prints the ASLEEP/ACTIVE banner.                                           |
+| `node server.mjs issue [name…]`  | Mint a fresh door-key (rotates/supersedes the old one). Extra `name` args also rotate those modules' secrets (e.g. `issue github`). Prints the door-key **ONCE**. |
+| `node server.mjs kill`           | Wipe the door-key + every known module secret (`<name>:token`) from the store. Bridge → ASLEEP.  |
+| `node server.mjs show`           | Print state (door-key present?, per-module surfaces + whether a secret is stored). NEVER prints secret values. |
 
-## 16. Troubleshooting
+`issue github` mints a GitHub installation token (App flow) or stores the static
+`GITHUB_TOKEN` (see the `github` module). Re-running `issue` is idempotent-by-rotation:
+the previous door-key stops working.
 
-| error (HTTP) | cause → fix |
-|--------------|-------------|
-| `no_sig` (401) | signed op without `sig` → sign it, or use `key=`. |
-| `no_ts` / `bad_ts` (401) | missing/non-numeric `ts` → send unix seconds. |
-| `ts_expired` (401) | clock off by >1h → fix system time; resend fresh `ts`+`nonce`. |
-| `bad_nonce` (401) | nonce length not 8–128 → use a random 16-char nonce. |
-| `bad_sig` (401) | canonical mismatch → check §11; is `t` `encodeURIComponent`'d? |
-| `replay` (401) | nonce reused → new nonce per request. |
-| `no_secret_server` (401) | KV empty (asleep) → press ⚡ or §10 bootstrap. |
-| `host_not_allowed` (403) | target not in `ALLOW_HOSTS` → add it. |
-| `bad_target` / `only_https` (400) | `t` not a valid https URL / not encoded. |
-| `bad_key` (PHP 401) | wrong `ACCESS_KEY`. |
-| `token_expired` (PHP) | GitHub token dead → supply fresh `gh=`. |
-| bot silent after deploy | `setWebhook` not run or wrong `secret_token` (§8). |
-| ⚡ 500 / "GitHub не выдан" | GitHub App misconfig / PEM not PKCS#8 (§6). |
+---
 
-## License
+## Module catalog
 
-MIT — see [LICENSE](LICENSE). Not affiliated with Cloudflare, GitHub, or Telegram.
-**Never commit real secrets.**
+Every `modules/*.mjs` file (except `_`-prefixed helpers and `*.test.mjs`) is auto-loaded
+in **sorted filename order**; dispatch is first-`match`-wins. "Public" ops skip auth;
+"Protected" ops require the door-key.
+
+| Op / module    | Access    | What it does                                                                                                   |
+|----------------|-----------|---------------------------------------------------------------------------------------------------------------|
+| `ping`         | Public    | Liveness probe. `?op=ping` → `{ok,pong,time,t}` (echoes optional `t` back). Answers even while ASLEEP.         |
+| `echo`         | Public    | Reflector. `?op=echo&msg=<text>` → `{ok,msg,len}`. `sig`/`key` are stripped before it runs.                    |
+| `info`         | Public    | Discovery card. `?op=info` → version, `allow_hosts`, live op catalog, GitHub stance, and `public_ops` list.    |
+| `ops`          | Public    | Op-name index. `?op=ops` → `{count, ops:[…], detail:[{op,public,background}]}`.                                |
+| `hash`         | Protected | Pure compute. `?op=hash&s=<text>` → `{ok,alg:"sha256",hex,len}`. 1 MB input cap. No core capability.           |
+| `secure_echo`  | Protected | Auth-gate proof. `?op=secure_echo&…` → reflects params post-auth; proves `sig`/`key`/`secret`/`token`/`password` are never echoed. |
+| `fetch`        | Protected | Bare HTTPS proxy demo. `?op=fetch&t=https://<allowlisted-host>/path` → GET via `core.proxy`; returns the response envelope. No injected secret. |
+| `github`       | Protected | GitHub proxy + secret injection. `?op=github&t=https://api.github.com/…` → injects `Authorization: Bearer <stored token>` and forwards via `core.proxy`. Client never sends a token. Has a `rotate` hook (mints App installation token, or stores static `GITHUB_TOKEN`). Only matches when the `t=` host is `api.github.com`. |
+| `run`          | Protected | Exec-class. `?op=run&name=<vetted>` → runs `EXEC_DIR/<name>` via `core.exec` with EMPTY args. Name must match `^[a-z0-9_-]+$`. Returns `{exit_code,stdout,truncated}`. **Off** unless `EXEC_ENABLED=1`. |
+| `temp`         | Protected | Exec-class. `?op=temp` → runs the fixed `scripts/temp.sh` (CPU temp in °C) via `core.exec`. No client input reaches the shell. **Off** unless `EXEC_ENABLED=1`. |
+| `telegram`     | Background| No data plane (no `match`/`handle`). A `start()` long-poll daemon: watches Telegram `getUpdates`, and on an operator `/issue` gesture calls `core.control.rotate(['door','github'])`. **Optional** — off (no-op) when `TELEGRAM_TOKEN` is empty. The daemon is fire-and-forget (`boot()` does not await it), so a present token never blocks the HTTP listener. Operator identity enforced by the kernel. |
+
+The `github` module targets `api.github.com`; the `telegram` daemon polls
+`api.telegram.org`. Both hosts must be in `ALLOW_HOSTS` for those modules to work (they
+are in the default allowlist).
+
+Non-module files in `modules/`: `_template.mjs`, `CONTRACT.md`, `_test_exec_modules.mjs`
+(helpers/docs, skipped by the loader).
+
+---
+
+## Config / env
+
+Copy `.env.example` → `.env`, `chmod 600`. `server.mjs` loads this `.env` itself (for the
+server AND the operator CLI) via a tolerant parser: full-line `#` comments and blank lines are
+ignored, an unquoted trailing ` # comment` is stripped, a value wrapped in matching quotes is
+kept literal, and a real environment variable always wins. Write values **bare** (`KEY=value`);
+multi-word values like `ALLOW_HOSTS` need no quotes. All values below are read by `kernel.mjs`
+`loadConfig` (globals) or by a module's `<NAME>_*` namespace. Per-module secrets are
+exposed to a module ONLY as its frozen `<NAME>_` view (e.g. `github` sees
+`GITHUB_TOKEN` as `env.TOKEN`); modules never read `process.env`.
+
+| Var                 | Required?          | Default (code)         | Purpose                                                                 |
+|---------------------|--------------------|------------------------|-------------------------------------------------------------------------|
+| `PORT`              | no                 | `8787`                 | TCP port. If co-hosting multiple gateways on one host, give each a **unique** port (a `bridge-mta`-style service may already own 8787). |
+| `BIND`              | no (set for LAN)   | `127.0.0.1`            | Bind address. Set to the Pi's **LAN IP**, never `0.0.0.0`.             |
+| `STORE_PATH`        | no                 | `./get-hub-store.json` | JSON store (door-key + module secrets), written `0600`.               |
+| `ALLOW_HOSTS`       | no                 | `api.github.com api.telegram.org` | Proxy host allowlist (space/comma sep). `core.proxy` refuses everything else. |
+| `KEY_TTL_SEC`       | no                 | `3600`                 | Door-key / minted-secret TTL on issue.                                 |
+| `TS_WINDOW_SEC`     | no                 | `3600`                 | Allowed clock skew for signed `ts` (± seconds).                        |
+| `NONCE_TTL_SEC`     | no                 | `TS_WINDOW_SEC` (3600) | How long a used nonce is remembered (in-memory).                       |
+| `DO_MAX_RESP`       | no                 | `100000`               | Max proxied response bytes (then truncated).                          |
+| `PROXY_TIMEOUT_MS`  | no                 | `10000`                | Per-hop outbound HTTPS timeout.                                        |
+| `PROXY_MAX_REDIRECT`| no                 | `3`                    | Max same-host redirects followed (cross-host never followed).        |
+| `UA`                | no                 | `get-hub/1.0`          | Outbound `User-Agent`.                                                 |
+| `OPERATOR_CHATS`    | no*                | (empty; alias `TELEGRAM_WHITELIST`) | Telegram chat-ids trusted as 1:1 operator DMs.           |
+| `OPERATOR_SENDERS`  | no* (req. for groups) | (empty)             | Telegram sender (user) ids authorized to trigger `rotate`.            |
+| `EXEC_ENABLED`      | no                 | `0` (off)              | `1`/`true` enables `core.exec`. Needed by `run`/`temp`.               |
+| `EXEC_DIR`          | if exec on         | (empty)                | Directory of vetted scripts. Required for exec to work. Under systemd use an **absolute** path (e.g. `/home/<user>/get-hub/scripts`), never `./scripts`. |
+| `EXEC_TIMEOUT_MS`   | no                 | `10000`                | Exec wall-clock timeout (then SIGKILL).                               |
+| `EXEC_MAX_OUT`      | no                 | `65536`                | Max captured stdout bytes.                                            |
+| `EXEC_MAX_ARGS`     | no                 | `16`                   | Max argv length (`run`/`temp` pass 0 args anyway).                   |
+| `EXEC_MAX_ARG_LEN`  | no                 | `4096`                 | Max length of any single argv token.                                 |
+| `GITHUB_TOKEN`      | optional           | (empty)                | Static GitHub token, injected as `Bearer`. Used if no App creds.     |
+| `GITHUB_APP_ID`     | optional           | (empty)                | GitHub App id (App-JWT flow).                                        |
+| `GITHUB_INSTALL_ID` | optional           | (empty)                | GitHub App installation id.                                          |
+| `GITHUB_APP_PEM`    | optional           | (empty)                | App private key PEM, INLINE (module can't read files).              |
+| `GITHUB_APP_PEM_FILE` | optional         | (empty)                | Path to PEM; kernel reads it at boot into `GITHUB_APP_PEM` (`*_FILE` convention). |
+| `TELEGRAM_TOKEN`    | optional           | (empty)                | Bot token for the `telegram` daemon. Empty → daemon is a no-op.      |
+| `TELEGRAM_WHITELIST`| optional (legacy)  | (empty)                | Legacy alias for `OPERATOR_CHATS`.                                   |
+
+\* Operator identity vars are only needed if you use the Telegram operator trigger. Any
+`<VAR>_FILE=/path` (with `<VAR>` unset) is expanded to the file contents by the kernel at
+boot — a generic convention for large/multiline secrets, used above by `GITHUB_APP_PEM_FILE`.
+
+See [`.env.example`](.env.example) for the full annotated list.
+
+---
+
+## Security notes
+
+- **LAN-only bind.** Bind to a LAN IP (or `127.0.0.1`), never `0.0.0.0`. Put any public
+  exposure behind a tunnel/reverse proxy — do not rebind to the world.
+- **`.env` is the only home for real secrets** — `chmod 600`, gitignored. Never commit a
+  real token/key/PEM (I5). The store file (`get-hub-store.json`) is also written `0600`.
+- **exec is OFF by default** (`EXEC_ENABLED=0`). Only enable it with a curated `EXEC_DIR`
+  of vetted, argument-free scripts. `core.exec` path-locks the script under `EXEC_DIR`
+  (realpath, no symlink/`..` escape), spawns `shell:false` with an arg array, and applies
+  a timeout + output cap.
+- **Proxy SSRF clamp.** `core.proxy` is the ONE outbound boundary: HTTPS-only, host
+  allowlist, DNS pinned to a pre-vetted **public** IP (blocks private/loopback/link-local/
+  metadata + IPv6 embedded-v4 tricks), rejects non-443 ports, and never follows a
+  cross-host redirect (so an injected `Authorization` header can never leak off-host).
+- **Secret scrubbing.** Logs and error bodies pass through a scrubber that redacts GitHub
+  tokens, Telegram bot tokens, door-keys, `Bearer` headers, PEM blocks, and secrets in
+  URLs (I9). Stack traces never reach a response body.
+- **Modules are TRUSTED code** — first-party, operator-authored/reviewed, exactly like
+  nginx modules or a server's own route handlers (SPEC §5.9). get-hub does NOT sandbox a
+  hostile module; the "zero-vuln" guarantee is against the **external fetch-only
+  attacker**, not against malicious code you dropped into `modules/`.
+
+For the complete contract, invariants (I1–I12), and threat model, read
+[`../server-node/SPEC.md`](../server-node/SPEC.md).
