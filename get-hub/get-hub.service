@@ -1,0 +1,38 @@
+# get-hub — systemd --user unit template.
+# Install to ~/.config/systemd/user/get-hub.service (see DEPLOY.md), then:
+#   systemctl --user daemon-reload && systemctl --user enable --now get-hub
+#
+# Placeholders to adjust:
+#   - WorkingDirectory / ExecStart path: this template assumes the code lives at
+#     %h/get-hub  (i.e. ~/get-hub). If you cloned elsewhere, edit the %h/get-hub paths
+#     (WorkingDirectory, ExecStart, and ReadWritePaths).
+#   - %h expands to the running user's home; no need to substitute %USER% by hand for a
+#     --user unit. If you must hard-code a user, replace %h with /home/<USER>.
+#   - node path: adjust /usr/bin/node if `which node` differs (e.g. nvm).
+#
+# No EnvironmentFile: server.mjs loads ./.env itself (relative to WorkingDirectory) for both
+# the server and the operator CLI, so there is nothing to wire here — and none of systemd's
+# inline-# / quote parsing quirks can corrupt a value. Real/systemd-set env still wins over .env.
+#
+# Bind stays LAN-only via BIND in the .env (set BIND=<pi-lan-ip>, never 0.0.0.0).
+
+[Unit]
+Description=get-hub signed fetch-only HTTPS gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/get-hub
+# No EnvironmentFile — server.mjs loads %h/get-hub/.env itself (see header note).
+ExecStart=/usr/bin/node %h/get-hub/server.mjs
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/get-hub
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

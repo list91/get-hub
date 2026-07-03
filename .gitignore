@@ -6,3 +6,16 @@ node_modules/
 php/config.php
 .dev.vars
 .env
+
+# get-hub — the KV store holds the live door-key (bridge-...) and module secrets. NEVER commit.
+# (I5) Covers the default store file, any *.json store, and the host .env — but NOT the
+# placeholder .env.example, test fixtures, or the SPEC.
+get-hub/.env
+get-hub/get-hub-store.json
+get-hub/*-store.json
+get-hub/*.store.json
+get-hub/get-hub-store.*.json
+!get-hub/.env.example
+# guard against a test/temp store written beside modules or in test/ dirs
+get-hub/**/.*-store.json
+get-hub/**/*-test-store.json
