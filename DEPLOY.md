@@ -302,6 +302,10 @@ logs — I9 — but volume, not content, is the DoS concern here.)
   in the unit, no `source .env` before the CLI. Real/systemd-set env wins over `.env`.
 - **Store + `.env` are `0600`.** The door-key persists across restarts in
   `get-hub-store.json`; you do NOT need to re-`issue` after a reboot.
+- **Mutate the store ONLY via the control plane** (`node server.mjs issue` / `kill`). The running
+  process caches the door-key in memory (no per-request disk read); hand-editing
+  `get-hub-store.json` while the service is up is **unsupported** — the live process keeps serving
+  the cached value until a restart, rotate, or TTL expiry. To change keys, always `issue`/`kill`.
 - **exec is off** unless you set `EXEC_ENABLED=1` + `EXEC_DIR` (needed only for `run`/`temp`).
   Under systemd `EXEC_DIR` must be an **absolute** path — with the shipped `scripts/`,
   `EXEC_DIR=/home/<user>/get-hub/scripts` enables `temp`/`uptime`.
