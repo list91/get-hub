@@ -12,7 +12,7 @@ call through the kernel's single outbound-HTTPS proxy.
 The security-bearing core is `kernel.mjs`. Behaviour is composed from auto-loaded
 `modules/*.mjs` files. `server.mjs` is BOTH the HTTP server and the operator CLI.
 
-For the full contract and threat model, see [`../server-node/SPEC.md`](../server-node/SPEC.md).
+For the full contract and threat model, see [`SPEC.md`](SPEC.md).
 
 ---
 
@@ -48,7 +48,7 @@ For the full contract and threat model, see [`../server-node/SPEC.md`](../server
 
 ```bash
 git clone <repo-url>
-cd bridge-endpoint-project/worker/get-hub    # (this folder is self-contained)
+cd get-hub    # the repo root is the product — self-contained
 
 cp .env.example .env
 chmod 600 .env                 # secrets live ONLY here — keep it out of git (I5)
@@ -122,7 +122,7 @@ Every signed request carries three extra params:
 
 | param   | meaning                                                            |
 |---------|-------------------------------------------------------------------|
-| `ts`    | unix seconds; must be within `TS_WINDOW_SEC` (default ±3600 s).    |
+| `ts`    | unix seconds; must be within `TS_WINDOW_SEC` (default ±120 s).     |
 | `nonce` | single-use string, 8–128 chars; replay of a seen nonce is refused.|
 | `sig`   | hex HMAC-SHA256 of the canonical string (below).                  |
 
@@ -234,8 +234,10 @@ exposed to a module ONLY as its frozen `<NAME>_` view (e.g. `github` sees
 | `STORE_PATH`        | no                 | `./get-hub-store.json` | JSON store (door-key + module secrets), written `0600`.               |
 | `ALLOW_HOSTS`       | no                 | `api.github.com api.telegram.org` | Proxy host allowlist (space/comma sep). `core.proxy` refuses everything else. |
 | `KEY_TTL_SEC`       | no                 | `3600`                 | Door-key / minted-secret TTL on issue.                                 |
-| `TS_WINDOW_SEC`     | no                 | `3600`                 | Allowed clock skew for signed `ts` (± seconds).                        |
-| `NONCE_TTL_SEC`     | no                 | `TS_WINDOW_SEC` (3600) | How long a used nonce is remembered (in-memory).                       |
+| `TS_WINDOW_SEC`     | no                 | `120`                  | Signed-`ts` clock skew / replay window (± seconds). **Tight by default** (was 3600) — security-relevant under public exposure. |
+| `NONCE_TTL_SEC`     | no                 | `TS_WINDOW_SEC` (120)  | How long a used nonce is remembered (in-memory).                       |
+| `NONCE_MAX`         | no                 | `100000`               | Hard cap on the in-memory nonce set (bounded ring) — bounds authed-flood memory. |
+| `ALLOW_KEY_PARAM`   | no                 | `true`                 | Allow the degraded `?key=` form. `0`/`false` refuses it (`key_param_disabled`) so the raw secret never rides in a URL. |
 | `DO_MAX_RESP`       | no                 | `100000`               | Max proxied response bytes (then truncated).                          |
 | `PROXY_TIMEOUT_MS`  | no                 | `10000`                | Per-hop outbound HTTPS timeout.                                        |
 | `PROXY_MAX_REDIRECT`| no                 | `3`                    | Max same-host redirects followed (cross-host never followed).        |
@@ -248,6 +250,12 @@ exposed to a module ONLY as its frozen `<NAME>_` view (e.g. `github` sees
 | `EXEC_MAX_OUT`      | no                 | `65536`                | Max captured stdout bytes.                                            |
 | `EXEC_MAX_ARGS`     | no                 | `16`                   | Max argv length (`run`/`temp` pass 0 args anyway).                   |
 | `EXEC_MAX_ARG_LEN`  | no                 | `4096`                 | Max length of any single argv token.                                 |
+| `HTTP_HEADERS_TIMEOUT_MS`  | no          | `8000`                 | Max time to receive all request headers (DoS bound).                 |
+| `HTTP_REQUEST_TIMEOUT_MS`  | no          | `15000`                | Max time to receive the full request.                                |
+| `HTTP_KEEPALIVE_TIMEOUT_MS`| no          | `5000`                 | Keep-alive idle timeout.                                             |
+| `HTTP_MAX_CONNECTIONS`     | no          | `256`                  | Max simultaneous TCP connections.                                   |
+| `HTTP_SOCKET_TIMEOUT_MS`   | no          | `20000`                | Per-socket inactivity timeout before destroy.                       |
+| `HTTP_MAX_URL_LEN`         | no          | `2048`                 | Over-long request URL → `414` before it reaches the kernel.         |
 | `GITHUB_TOKEN`      | optional           | (empty)                | Static GitHub token, injected as `Bearer`. Used if no App creds.     |
 | `GITHUB_APP_ID`     | optional           | (empty)                | GitHub App id (App-JWT flow).                                        |
 | `GITHUB_INSTALL_ID` | optional           | (empty)                | GitHub App installation id.                                          |
@@ -268,6 +276,9 @@ See [`.env.example`](.env.example) for the full annotated list.
 
 - **LAN-only bind.** Bind to a LAN IP (or `127.0.0.1`), never `0.0.0.0`. Put any public
   exposure behind a tunnel/reverse proxy — do not rebind to the world.
+- **Public exposure.** Default posture is LAN/trusted. To go internet-facing, get-hub MUST sit
+  behind a hardened HTTPS reverse proxy that enforces per-IP limits (the kernel can't) — see the
+  **"Public exposure (internet-facing)"** section in [`DEPLOY.md`](DEPLOY.md).
 - **`.env` is the only home for real secrets** — `chmod 600`, gitignored. Never commit a
   real token/key/PEM (I5). The store file (`get-hub-store.json`) is also written `0600`.
 - **exec is OFF by default** (`EXEC_ENABLED=0`). Only enable it with a curated `EXEC_DIR`
@@ -287,4 +298,4 @@ See [`.env.example`](.env.example) for the full annotated list.
   attacker**, not against malicious code you dropped into `modules/`.
 
 For the complete contract, invariants (I1–I12), and threat model, read
-[`../server-node/SPEC.md`](../server-node/SPEC.md).
+[`SPEC.md`](SPEC.md).

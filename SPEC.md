@@ -9,7 +9,7 @@ get-hub is a **fetch-only gateway**: one GET-only signed HTTPS URL routes to plu
 that claims it. Everything user-visible (`ping`, `info`, `do`, GitHub, demos) is a
 module. The kernel itself is small, fixed, and security-bearing.
 
-This SPEC generalizes the already-proven `server-node/server.mjs` (HMAC + `op=do` +
+This SPEC generalizes the already-proven `legacy/server-node/server.mjs` (HMAC + `op=do` +
 GitHub injection, blind-deployed 3× on the Pi). We **refactor** that working code into
 kernel + modules — we do not rewrite from scratch, and we do not weaken any guard that
 already passed.
@@ -152,8 +152,8 @@ canonical = "v1\n" + path + "\n" + <params sorted, urlencoded, joined '&', 'sig'
 sig       = hex( HMAC_SHA256(secret, canonical) )
 ```
 
-- Signed request carries `ts` (unix s, ±`TS_WINDOW_SEC`, default 3600), `nonce`
-  (8–128 chars, **single-use**, stored until window expiry), `sig`.
+- Signed request carries `ts` (unix s, ±`TS_WINDOW_SEC`, default 120 — tight replay window),
+  `nonce` (8–128 chars, **single-use**, stored until window expiry), `sig`.
 - Two accepted forms: **(a) full HMAC** (`sig`), **(b) degraded `key=<secret>`-in-URL**
   for fetch-only clients that cannot sign. Both compared **constant-time**.
 - No active secret (ASLEEP) → signed req `no_secret_server`, degraded req `no_sig`.
@@ -249,6 +249,11 @@ block incl. IPv6-embedded forms, DNS-rebind pin, no cross-host redirect, respons
 (HMAC before dispatch, constant-time, replay/skew guards, no protected op served without a
 valid signature), and no server-side secret (door-key, injected Bearer, PAT/App token, PEM)
 ever reaching a response body or a log.
+
+**Recon surface (not a secret leak).** The public discovery ops `info`/`ops` reveal the version,
+`allow_hosts`, and the op catalog to **anonymous** callers — by design (I9 classifies these as
+non-sensitive policy). This is a known **fingerprinting/recon** surface for a public deploy, not a
+secret leak; a public-exposure deployment should be aware of it (see DEPLOY.md "Public exposure").
 
 **Consequence for the linter (I11).** `lint.mjs` is a **quality / hygiene gate**, not a
 security boundary. It catches *accidental* contract violations (a module that forgets to route

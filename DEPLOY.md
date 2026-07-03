@@ -28,13 +28,12 @@ protected GET.
 
 ```bash
 ssh pi@PI_IP
-git clone <repo-url> ~/src/bridge-endpoint-project
-cp -r ~/src/bridge-endpoint-project/worker/get-hub ~/get-hub   # stable path the unit expects
+git clone <repo-url> ~/get-hub   # the repo root IS the product; stable path the unit expects
 cd ~/get-hub
 ```
 
-(If you already have just the `get-hub/` folder, copy it to `~/get-hub` — it is
-self-contained. The systemd unit assumes `~/get-hub`; edit its paths if you use another.)
+(The repo root is self-contained. The systemd unit assumes `~/get-hub`; edit its paths
+if you clone somewhere else.)
 
 ## 2. Configure `.env` (secrets live ONLY here)
 
@@ -195,10 +194,108 @@ curl "http://$PI_IP:$PORT/?op=github&key=$KEY&t=https://api.github.com/repos/OWN
 
 ---
 
+## Public exposure (internet-facing)
+
+The default posture is **LAN / trusted network** (bind to a private IP, never `0.0.0.0`).
+get-hub is safe to put on the **public internet ONLY behind a hardened HTTPS reverse proxy**,
+and only when the controls below are ALL in place.
+
+**Why the proxy is mandatory, not optional.** The kernel is **single-threaded**, has **NO IP
+awareness**, and **trusts NO client header** (`X-Forwarded-For` etc. are ignored). It therefore
+**cannot** do per-IP rate limiting or per-IP connection caps — those can be enforced **ONLY at
+the proxy**. get-hub itself binds **plain HTTP on localhost/LAN** and relies on the proxy for TLS
+and per-client limits. Its own knobs (`HTTP_*`, `NONCE_MAX`, tight `TS_WINDOW_SEC`, the in-memory
+door-key cache) only bound *in-process* blast radius; they are not a substitute for a proxy.
+
+### Mandatory controls
+
+**1. TLS termination at the proxy — HTTPS only.**
+Terminate TLS at Tailscale Funnel, Caddy, or nginx. Enforce **HTTPS only** with **HSTS** and **no
+plaintext fallback**. get-hub stays on plain HTTP bound to `127.0.0.1` (or a LAN IP) *behind* the
+proxy — it never faces the internet directly and never terminates TLS itself.
+
+**2. Per-IP rate limit + connection cap at the proxy** (get-hub cannot do this itself).
+
+Caddy (needs the `caddy-ratelimit` plugin for `rate_limit`):
+
+```caddyfile
+get-hub.example.com {
+    rate_limit {
+        zone perip {
+            key    {remote_host}
+            events 20
+            window 1m
+        }
+    }
+    reverse_proxy 127.0.0.1:8787
+}
+```
+
+nginx (`limit_req` + `limit_conn`):
+
+```nginx
+limit_req_zone  $binary_remote_addr zone=gethub_rl:10m rate=20r/m;
+limit_conn_zone $binary_remote_addr zone=gethub_cc:10m;
+
+server {
+    listen 443 ssl;
+    server_name get-hub.example.com;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    location / {
+        limit_req  zone=gethub_rl burst=10 nodelay;
+        limit_conn gethub_cc 10;
+        proxy_pass http://127.0.0.1:8787;
+    }
+}
+```
+
+**Tailscale Funnel** restricts reachability to **your tailnet** unless you explicitly make it
+public — that private-by-default scope is often the simplest "hardening" of all. It does **not**
+give you per-IP rate limiting; if you go fully public via Funnel, front it with Caddy/nginx (or
+accept only the in-process `HTTP_*` bounds).
+
+**3. Least-privilege injected token.**
+The single door-key grants whatever the **server-injected GitHub token** can do — any key-holder
+inherits its **full scope**. For a public deploy, MANDATE a **fine-grained, read-only,
+single-repo** GitHub token. **Never** a broad or admin PAT. Scope the credential at GitHub; the
+bridge adds no repo/method policy of its own.
+
+**4. Drop `api.telegram.org` from `ALLOW_HOSTS`** on any public data-plane instance.
+Otherwise a key-holder could use the proxy as a Telegram **egress/exfil channel**. Set e.g.
+`ALLOW_HOSTS=api.github.com` and run the Telegram operator daemon on a **separate, non-public**
+instance.
+
+**5. Consider `ALLOW_KEY_PARAM=0`** if every client can HMAC-sign.
+This refuses the degraded `?key=<door-key>` form (error `key_param_disabled`) so the raw secret
+never rides in a URL or lands in proxy/referrer logs. Keep the tight `TS_WINDOW_SEC` (default
+`120`) so a captured signed URL is replayable only briefly. Leave the key-param **on** if any
+client is a plain fetch-only browser LLM that cannot sign.
+
+**6. One shared door-key = no per-user scoping and no per-user revocation.**
+There is a *single* door-key. It has **no per-user identity**: you cannot scope or revoke one
+user without rotating — and rotating **locks out everyone**. Stated plainly: get-hub today fits a
+**single-tenant deploy, or a trusted small group**, behind the proxy. It is **NOT** fit for
+**untrusted multi-user** exposure yet. Untrusted multi-user needs **per-user auth (mTLS or
+per-user tokens) enforced AT THE PROXY**, or a future per-user-key kernel feature. Do not
+overclaim this — the bridge does not authenticate individuals.
+
+**7. Log hygiene + disk.**
+Suppress or sample high-frequency error lines at the proxy so an anonymous flood cannot fill the
+disk with log churn. Ensure the store dir (`STORE_PATH`) and any log sink are on a volume that
+**cannot fill to failure**, and that logs rotate. (Secrets are already scrubbed from get-hub's own
+logs — I9 — but volume, not content, is the DoS concern here.)
+
+> **Recon surface (not a leak).** The public discovery ops `info` / `ops` reveal the version,
+> `allow_hosts`, and the op catalog to **anonymous** callers by design. That is expected, non-secret
+> policy — but it is a fingerprinting/recon surface a public deploy should be aware of.
+
+---
+
 ## Notes
 
-- **LAN-only.** Bind to `PI_IP`, never `0.0.0.0`. For public exposure put a tunnel/reverse
-  proxy in front and keep `BIND` on the LAN IP.
+- **LAN-only by default.** Bind to `PI_IP`, never `0.0.0.0`. For public exposure follow the
+  **"Public exposure (internet-facing)"** section above — proxy in front, `BIND` on the LAN IP.
 - **Unique port per gateway.** If you co-host multiple gateways on one host, each needs its
   own `PORT` — a `bridge-mta`-style service may already own `8787`.
 - **`.env` is loaded by `server.mjs`,** for both the server and the CLI — no `EnvironmentFile`

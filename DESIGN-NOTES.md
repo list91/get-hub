@@ -103,5 +103,5 @@ See SPEC §6. Each must have a **red-team test that tries to violate it and fail
 module" library.
 
 ## Rename
-Repo `bridge-mta` → **`get-hub`**. Local path stays `.../worker/server-node/` for now;
-clone URLs / docs to be updated to get-hub during production polish.
+Repo `bridge-mta` → **`get-hub`**. The get-hub product now lives at the repo root
+(`github.com/list91/get-hub`); the old Worker + flat-port code is archived under `legacy/`.
