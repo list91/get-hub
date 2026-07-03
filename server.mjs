@@ -65,6 +65,11 @@ const SEC_HEADERS = {
   "X-Content-Type-Options": "nosniff",
 };
 
+function intEnv(name, dflt) {
+  const n = parseInt(process.env[name] || "", 10);
+  return Number.isFinite(n) && n > 0 ? n : dflt;
+}
+
 async function build() {
   const cfg = loadConfig(process.env);
   const modules = await loadModules(MODULES_DIR);
@@ -76,7 +81,15 @@ async function serve() {
   const { cfg, modules, kernel } = await build();
   await kernel.boot();
 
+  const maxUrlLen = intEnv("HTTP_MAX_URL_LEN", 2048);
   const srv = http.createServer(async (req, res) => {
+    // Cheap early reject: an over-long URL never reaches the kernel (it would inflate parse +
+    // canonical() sort work). 2 KB is ample for a signed op URL.
+    if (req.url && req.url.length > maxUrlLen) {
+      res.writeHead(414, SEC_HEADERS);
+      res.end(req.method === "HEAD" ? undefined : JSON.stringify({ ok: false, error: "uri_too_long" }));
+      return;
+    }
     let out;
     try { out = await kernel.handleRequest(req); }
     catch (e) {
@@ -88,6 +101,17 @@ async function serve() {
     // HEAD: headers only, no body.
     res.end(req.method === "HEAD" ? undefined : payload);
   });
+
+  // Public-exposure DoS hardening: bound slow/half-open connections and total sockets so an
+  // anonymous attacker cannot exhaust the single-threaded event loop with no door-key. A fronting
+  // reverse proxy MUST still enforce per-IP rate + connection limits (the kernel has no IP awareness
+  // and trusts no client header). All overridable via env for tuning.
+  srv.headersTimeout = intEnv("HTTP_HEADERS_TIMEOUT_MS", 8000);
+  srv.requestTimeout = intEnv("HTTP_REQUEST_TIMEOUT_MS", 15000);
+  srv.keepAliveTimeout = intEnv("HTTP_KEEPALIVE_TIMEOUT_MS", 5000);
+  srv.maxConnections = intEnv("HTTP_MAX_CONNECTIONS", 256);
+  const SOCKET_TIMEOUT_MS = intEnv("HTTP_SOCKET_TIMEOUT_MS", 20000);
+  srv.on("connection", (s) => { s.setTimeout(SOCKET_TIMEOUT_MS, () => s.destroy()); });
 
   srv.listen(cfg.PORT, cfg.BIND, () => {
     const asleep = kernel.isAsleep();

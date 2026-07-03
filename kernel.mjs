@@ -51,7 +51,14 @@ export function loadConfig(rawEnv = process.env) {
     ALLOW_HOSTS: (env.ALLOW_HOSTS || "api.github.com api.telegram.org")
       .split(/[,\s]+/).filter(Boolean).map((h) => normalizeHost(h)).filter(Boolean),
     KEY_TTL_SEC: parseInt(env.KEY_TTL_SEC || "3600", 10),
-    TS_WINDOW_SEC: parseInt(env.TS_WINDOW_SEC || "3600", 10),
+    // Clock-skew / replay window for a SIGNED URL. Tight by default: a captured signed URL is
+    // replayable at most this long (and only until its nonce is seen). Public exposure should keep
+    // it small; raise only for badly-skewed clients. (Was 3600 — a 1-hour public replay window.)
+    TS_WINDOW_SEC: parseInt(env.TS_WINDOW_SEC || "120", 10),
+    // Degraded ?key=<door-key> form (unsigned, for fetch-only clients that cannot HMAC). It is the
+    // product's core data path (browser LLMs), so it defaults ON — but the raw secret then rides in
+    // the URL (proxy/referrer logs). A signing-capable deployment can force-sign by disabling it.
+    ALLOW_KEY_PARAM: env.ALLOW_KEY_PARAM === undefined ? true : (env.ALLOW_KEY_PARAM === "1" || env.ALLOW_KEY_PARAM === "true"),
     // Operator identity for the control plane (I12), OWNED BY THE KERNEL — not a module.
     // OPERATOR_CHATS: chat-ids that are trusted 1:1 operator channels (a private DM where the
     //   chat IS the operator; sender need not be separately verified).
@@ -62,7 +69,13 @@ export function loadConfig(rawEnv = process.env) {
       .split(/[,\s]+/).map((s) => s.trim()).filter(Boolean),
     OPERATOR_SENDERS: (env.OPERATOR_SENDERS || "")
       .split(/[,\s]+/).map((s) => s.trim()).filter(Boolean),
-    NONCE_TTL_SEC: parseInt(env.NONCE_TTL_SEC || env.TS_WINDOW_SEC || "3600", 10),
+    // A nonce only needs to be remembered for as long as its ts is still accepted → default it to
+    // TS_WINDOW_SEC, NOT a fixed hour. Anything older is already rejected by ts_expired, so there is
+    // no point retaining it (and retaining it longer is the DoS surface we are closing).
+    NONCE_TTL_SEC: parseInt(env.NONCE_TTL_SEC || env.TS_WINDOW_SEC || "120", 10),
+    // Hard cap on the in-memory nonce set — a bounded ring. Replay protection only spans the ts
+    // window, so a cap plus lazy expiry is sufficient and makes an authed-flood OOM impossible.
+    NONCE_MAX: parseInt(env.NONCE_MAX || "100000", 10),
     DO_MAX_RESP: parseInt(env.DO_MAX_RESP || "100000", 10),
     EXEC_ENABLED: env.EXEC_ENABLED === "1" || env.EXEC_ENABLED === "true",
     EXEC_DIR: env.EXEC_DIR || "",
@@ -224,17 +237,53 @@ function makeStore(cfg) {
   }
   function set(key, v, ttlSec) {
     const s = loadRaw();
-    s[key] = { v, exp: ttlSec ? nowSec() + ttlSec : 0 };
+    const exp = ttlSec ? nowSec() + ttlSec : 0;
+    s[key] = { v, exp };
     saveRaw(s);
+    if (key === DOOR_KEY) { dkVal = v; dkExp = exp; dkLoaded = true; } // keep cache coherent on rotate
   }
-  function del(key) { const s = loadRaw(); delete s[key]; saveRaw(s); }
+  function del(key) {
+    const s = loadRaw(); delete s[key]; saveRaw(s);
+    if (key === DOOR_KEY) { dkVal = ""; dkExp = 0; dkLoaded = true; }   // invalidate on kill
+  }
 
-  // in-memory nonce map (lost on restart — ts window bounds replay). Kernel-internal.
+  // ── door-key read-through cache (auth hot path) ──────────────────────────────────────
+  // authenticate() runs getDoorKey() on EVERY protected-op hit (incl. anonymous 401-bound probes
+  // carrying key=/sig=). Reading + JSON.parsing the store file synchronously per request blocks the
+  // single event loop → a keyless flood is a DoS. Cache the door-key in memory: load from disk once,
+  // and refresh only when it is rotated (set), killed (del), or its TTL lapses. Zero disk I/O per auth.
+  const DOOR_KEY = "hmac:current";
+  let dkVal = "", dkExp = 0, dkLoaded = false;
+  function getDoorKey() {
+    const now = nowSec();
+    if (dkLoaded && (dkExp === 0 || now < dkExp)) return dkVal;         // cache hit (never-expiring or still-fresh)
+    const s = loadRaw();                                                // miss: one disk read, then re-cache
+    const e = s[DOOR_KEY];
+    if (!e || (e.exp && e.exp < now)) { dkVal = ""; dkExp = 0; dkLoaded = true; return ""; }
+    dkVal = e.v; dkExp = e.exp || 0; dkLoaded = true;
+    return dkVal;
+  }
+
+  // ── bounded in-memory nonce set (lost on restart — ts window bounds replay). Kernel-internal. ──
+  // Insertion-ordered Map used as a bounded ring: all entries share NONCE_TTL_SEC, so insertion
+  // order == expiry order and the OLDEST live at the FRONT. Per call we do O(1) membership + a lazy
+  // head-expiry that stops at the first still-valid entry (each entry deleted at most once, never a
+  // full-map scan), plus a hard NONCE_MAX cap that evicts the oldest. This makes both the O(n^2)
+  // sweep and the unbounded-heap OOM impossible under an authenticated flood.
   const nonces = new Map();
   function nonceSeen(n) {
     const now = nowSec();
-    for (const [k, exp] of nonces) if (exp < now) nonces.delete(k);
-    if (nonces.has(n)) return true;
+    const prev = nonces.get(n);
+    if (prev !== undefined) {
+      if (prev >= now) return true;    // live nonce → genuine replay
+      nonces.delete(n);                // stale entry → drop (frees its front slot / lets us re-add)
+    }
+    for (const [k, exp] of nonces) { if (exp >= now) break; nonces.delete(k); } // lazy head-expiry, bounded
+    while (nonces.size >= cfg.NONCE_MAX) {                                       // hard cap: evict oldest
+      const oldest = nonces.keys().next().value;
+      if (oldest === undefined) break;
+      nonces.delete(oldest);
+    }
     nonces.set(n, now + cfg.NONCE_TTL_SEC);
     return false;
   }
@@ -261,7 +310,7 @@ function makeStore(cfg) {
     };
   }
 
-  return { get, set, del, nonceSeen, moduleView };
+  return { get, set, del, nonceSeen, getDoorKey, moduleView };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -695,7 +744,7 @@ export function createKernel(cfg, modules) {
   const coreFor = (name) => coreFactory(name, { privileged: false });
   const privilegedCoreFor = (name) => coreFactory(name, { privileged: true });
 
-  function getDoorKey() { return store.get("hmac:current") || ""; }
+  function getDoorKey() { return store.getDoorKey(); } // cached read-through (no per-request disk I/O)
 
   // ── auth (kernel-owned, before dispatch, unbypassable I1/I4) ──
   // Ported verbatim from proven server.mjs verifyRequest, plus degraded key= form.
@@ -704,8 +753,10 @@ export function createKernel(cfg, modules) {
     const hasSig = !!params.sig;
     const hasKey = !!params.key;
 
-    // Degraded key= form (for fetch-only clients that cannot sign).
+    // Degraded key= form (for fetch-only clients that cannot sign). Rides the raw secret in the URL,
+    // so a hardened (signing-capable) deployment can disable it via ALLOW_KEY_PARAM=0.
     if (!hasSig && hasKey) {
+      if (!cfg.ALLOW_KEY_PARAM) return { ok: false, err: "key_param_disabled" };
       if (!secret) return { ok: false, err: "no_secret_server" };
       if (!ctEqual(params.key, secret)) return { ok: false, err: "bad_key" };
       return { ok: true };
