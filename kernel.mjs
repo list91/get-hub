@@ -279,10 +279,18 @@ function makeStore(cfg) {
       nonces.delete(n);                // stale entry → drop (frees its front slot / lets us re-add)
     }
     for (const [k, exp] of nonces) { if (exp >= now) break; nonces.delete(k); } // lazy head-expiry, bounded
-    while (nonces.size >= cfg.NONCE_MAX) {                                       // hard cap: evict oldest
-      const oldest = nonces.keys().next().value;
-      if (oldest === undefined) break;
-      nonces.delete(oldest);
+    // Hard cap. Insertion-ordered Map + constant TTL ⇒ the oldest entry has the smallest exp.
+    // NEVER evict a still-live nonce: forgetting a nonce whose signed URL is still inside its ts
+    // window would reopen single-use replay under an authenticated flood (>NONCE_MAX fresh nonces
+    // within one TTL). If the oldest is still live, the set is entirely live ⇒ refuse this request
+    // as over-capacity (treat as replay) — backpressure the flooder instead of dropping a victim's
+    // live nonce. The memory bound still holds: size can never exceed NONCE_MAX.
+    while (nonces.size >= cfg.NONCE_MAX) {
+      const it = nonces.entries().next().value;
+      if (!it) break;
+      const [oldestKey, oldestExp] = it;
+      if (oldestExp >= now) return true; // all live → refuse; no live-nonce eviction, no replay reopen
+      nonces.delete(oldestKey);          // oldest already expired → safe to evict
     }
     nonces.set(n, now + cfg.NONCE_TTL_SEC);
     return false;

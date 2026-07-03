@@ -38,17 +38,23 @@ function signUrl(pathStr, params, secret) {
   return `${pathStr}?${qs}`;
 }
 
-// ── 1. Nonce set is a BOUNDED ring: NONCE_MAX cap evicts oldest; recent nonce still detected ──────
-test("nonce: NONCE_MAX bounds the set — oldest evicted, recent replay still caught (no unbounded heap)", async () => {
+// ── 1. Nonce set is BOUNDED but NEVER evicts a still-live nonce (no single-use replay reopen) ─────
+// Re-attack wf_65fd31b4 found the first cut of this DoS fix reopened replay: the cap evicted the
+// oldest entry unconditionally, so under an authed flood (>NONCE_MAX fresh nonces within one TTL) a
+// still-live, already-spent nonce was forgotten and its signed URL replayed. Correct behavior: when
+// the set is full of LIVE nonces, REFUSE the incoming request (backpressure) rather than drop a
+// victim's live nonce. The memory bound still holds; the anti-replay guarantee is never voided.
+test("nonce: NONCE_MAX bounds the set AND never evicts a live nonce — over-capacity is refused, replay still caught", async () => {
   const { kernel } = await kernelWith({ NONCE_MAX: "5", NONCE_TTL_SEC: "300" });
   const store = kernel.store;
-  const seen = [];
-  for (let i = 0; i < 12; i++) seen.push(store.nonceSeen("n" + i)); // 12 fresh nonces, cap 5
-  assert.ok(seen.every((s) => s === false), "each fresh nonce is first-seen (false)");
-  // the most recent nonce is still remembered → genuine replay is caught
-  assert.equal(store.nonceSeen("n11"), true, "recent nonce within cap → detected as replay");
-  // the oldest was evicted by the cap → it is forgotten (re-usable), proving the set never grows past cap
-  assert.equal(store.nonceSeen("n0"), false, "oldest nonce evicted by NONCE_MAX → set is bounded, not unbounded");
+  // Fill to the cap with fresh, live nonces — each is first-seen.
+  for (let i = 0; i < 5; i++) assert.equal(store.nonceSeen("n" + i), false, "fresh nonce within cap → first-seen");
+  // Set is now full of LIVE nonces. A further fresh nonce must be REFUSED (over-capacity backpressure),
+  // NOT admitted by evicting a live one — evicting a live nonce would reopen single-use replay.
+  assert.equal(store.nonceSeen("n5"), true, "over capacity, all live → refused (backpressure), not admitted");
+  // The oldest live nonce was NOT forgotten: replaying it is still caught. This is the anti-replay property
+  // the earlier buggy version voided (it asserted the opposite — that n0 became re-usable).
+  assert.equal(store.nonceSeen("n0"), true, "oldest LIVE nonce still remembered → replay caught, set stayed bounded");
 });
 
 // ── 2. Door-key is cached in memory: rotate/kill stay coherent, but a raw disk edit is NOT re-read ──
