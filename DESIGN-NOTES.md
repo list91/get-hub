@@ -102,7 +102,7 @@ See SPEC §6. Each must have a **red-team test that tries to violate it and fail
 + rotate) · `telegram`(start daemon + control). These double as the "write your own
 module" library.
 
-## Rename
-Repo `bridge-mta` → **`get-hub`**. The get-hub product now lives at the repo root
-(`github.com/list91/get-hub`); the old Worker + flat-port code is preserved in the private
-backup repo `github.com/list91/bridge-mta-archive`.
+## Lineage
+get-hub lives at the repo root (`github.com/list91/get-hub`). Its predecessor —
+the original Cloudflare Worker MVP and the first zero-dep Node port it was refactored
+from — is preserved in a private backup repo for reference; it is not part of this codebase.

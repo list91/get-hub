@@ -72,7 +72,7 @@ matrix (below), zero manual fixups — the proven blind-agent harness (worked 3�
   copy-paste template + `core` list + links to worked examples); `THREAT-MODEL.md`
   (invariants + the attack-tests that back them); `CONTRIBUTING.md` (how to add a module,
   lint/test gates); `CHANGELOG.md`; `LICENSE`; `.env.example` placeholders.
-- **rename**: `bridge-mta` → `get-hub` in clone URLs / docs / package name.
+- **naming**: consistent `get-hub` across clone URLs / docs / package name.
 
 ## Phase 7 — Final security sign-off + report
 Full invariant matrix green, linter green, blind E2E green, docs complete. Written report:
