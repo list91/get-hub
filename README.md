@@ -1,4 +1,6 @@
-# get-hub
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="get-hub — signed fetch-only gateway · zero deps" width="100%">
+</p>
 
 **A self-hosted gateway between fetch-only clients (browser LLMs, webhooks, cron) and
 your private APIs.**

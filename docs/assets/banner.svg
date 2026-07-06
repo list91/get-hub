@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-label="get-hub — signed fetch-only gateway, zero deps">
+  <title>get-hub — signed fetch-only gateway</title>
+  <rect x="0" y="0" width="1280" height="320" rx="16" fill="#0d1117"/>
+
+  <!-- hub: hexagon with keyhole, spokes to endpoint nodes -->
+  <g stroke="#eab355" stroke-width="6" fill="none" stroke-linecap="round">
+    <path d="M230 95 L290.6 130 L290.6 200 L230 235 L169.4 200 L169.4 130 Z"/>
+  </g>
+  <g stroke="#eab355" stroke-width="5" stroke-linecap="round">
+    <line x1="230" y1="95"  x2="230" y2="57"/>
+    <line x1="290.6" y1="130" x2="323.5" y2="111"/>
+    <line x1="290.6" y1="200" x2="323.5" y2="219"/>
+    <line x1="230" y1="235" x2="230" y2="273"/>
+    <line x1="169.4" y1="200" x2="136.5" y2="219"/>
+    <line x1="169.4" y1="130" x2="136.5" y2="111"/>
+  </g>
+  <g stroke="#eab355" stroke-width="5" fill="none">
+    <circle cx="230" cy="45"  r="12"/>
+    <circle cx="333.9" cy="105" r="12"/>
+    <circle cx="333.9" cy="225" r="12"/>
+    <circle cx="230" cy="285" r="12"/>
+    <circle cx="126.1" cy="225" r="12"/>
+    <circle cx="126.1" cy="105" r="12"/>
+  </g>
+  <g fill="#eab355">
+    <circle cx="230" cy="150" r="16"/>
+    <path d="M222 160 L213 198 L247 198 L238 160 Z"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="430" y="178" font-family="ui-monospace, 'SFMono-Regular', Consolas, Menlo, monospace" font-size="84" font-weight="600" letter-spacing="2" fill="#f2ede4">get-hub</text>
+  <text x="434" y="228" font-family="ui-monospace, 'SFMono-Regular', Consolas, Menlo, monospace" font-size="26" fill="#8b949e">signed fetch-only gateway · zero deps</text>
+</svg>
