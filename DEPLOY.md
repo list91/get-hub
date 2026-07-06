@@ -5,7 +5,7 @@ mechanism. This file is the concrete LAN deploy: clone to `~/get-hub`, configure
 mint the door-key, install a `--user` systemd service, and verify end-to-end.
 
 Everything below runs **over ssh** to a Raspberry Pi on your LAN. Requirements: **Node ≥ 18**
-on the Pi (`node --version`) and its LAN IP (call it `PI_IP`, e.g. `192.168.0.101`).
+on the Pi (`node --version`) and its LAN IP (call it `PI_IP`, e.g. `192.168.1.42`).
 
 **Pick a `PORT` up front** (default `8787`). Examples below use `8788` so they don't collide
 with another service that may already own `8787`. Set the same value in `.env`.
@@ -13,7 +13,7 @@ Every `curl` below uses `$PORT` — export it in your shell first:
 
 ```bash
 PORT=8788        # your chosen port; must match PORT in .env
-PI_IP=192.168.0.101
+PI_IP=192.168.1.42
 ```
 
 **Deploy flow at a glance:** clone/obtain → `cp .env.example .env` → edit `.env` (BIND, PORT,
@@ -47,7 +47,7 @@ Set at minimum (write values **bare** — `server.mjs` loads `.env` itself, so n
 gymnastics; multi-word values like `ALLOW_HOSTS` need no quotes):
 
 ```bash
-BIND=192.168.0.101               # the Pi's LAN IP (your PI_IP) — NOT 0.0.0.0, NOT 127.0.0.1
+BIND=192.168.1.42               # the Pi's LAN IP (your PI_IP) — NOT 0.0.0.0, NOT 127.0.0.1
 PORT=8788                        # your chosen port — must match the PORT you export in the shell
 ALLOW_HOSTS=api.github.com api.telegram.org   # hosts op=fetch/github may reach — UNQUOTED
 ```
@@ -125,7 +125,7 @@ systemctl --user status get-hub --no-pager -l
 # ● get-hub.service — get-hub signed fetch-only HTTPS gateway
 #    Active: active (running) …
 #    …
-#    get-hub get-hub-1.0.0 on http://192.168.0.101:8788
+#    get-hub get-hub-1.0.0 on http://192.168.1.42:8788
 #      allow_hosts=api.github.com,api.telegram.org  store=./get-hub-store.json
 #      modules=echo,fetch,github,hash,info,ops,ping,run,secure_echo,telegram,temp
 #      state: ACTIVE — door-key present.
