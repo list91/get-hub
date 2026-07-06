@@ -1,53 +1,66 @@
-# get-hub — signed, fetch-only HTTPS LLM-chat gateway
+# get-hub
 
-**One LAN HTTPS URL that gives a fetch-only LLM chat controlled, signed access to your
-private APIs — running on any box with Node.js. Zero dependencies.**
+**A self-hosted gateway between fetch-only clients (browser LLMs, webhooks, cron) and
+your private APIs.**
 
-get-hub is a small, self-contained **GET/HEAD-only** gateway. A client (typically an
-LLM that can only issue HTTP GETs) calls `?op=<name>&…`; the kernel authenticates the
-request with an HMAC **door-key**, dispatches to the first matching **module**, and the
-module injects a server-side credential the client never sees before forwarding the
-call through the kernel's single outbound-HTTPS proxy.
+![Node ≥ 18](https://img.shields.io/badge/node-%E2%89%A518-339933?logo=node.js&logoColor=white)
+![Zero dependencies](https://img.shields.io/badge/dependencies-0-blue)
+![GET / HEAD only](https://img.shields.io/badge/methods-GET%20%2F%20HEAD%20only-orange)
+![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)
 
-The security-bearing core is `kernel.mjs`. Behaviour is composed from auto-loaded
-`modules/*.mjs` files. `server.mjs` is BOTH the HTTP server and the operator CLI.
+- **No credential on the client.** The client gets a *door-key* — a temporary key with a
+  TTL you set. 5 minutes is enough to make a request.
+- **Every request is HMAC-signed and single-use.** Timestamp window + one-time nonce;
+  replay is rejected by design.
+- **The real token never leaves the server.** get-hub injects it into the upstream call
+  on the client's behalf.
+- **Worst case of a leak:** someone can call your gateway for the few minutes the key has
+  left — never the token itself.
 
-For the full contract and threat model, see [`SPEC.md`](SPEC.md).
+Zero runtime dependencies (Node ≥ 18 built-ins only). One security kernel, pluggable
+modules. Runs on anything from a Raspberry Pi up.
 
----
+```mermaid
+sequenceDiagram
+    participant C as fetch-only client<br/>(browser LLM)
+    participant K as get-hub kernel
+    participant A as private API<br/>(api.github.com)
+    C->>K: GET /?op=github&t=…&ts=…&nonce=…&sig=…
+    Note over K: verify HMAC (door-key)<br/>±120 s window · single-use nonce
+    K->>A: GET … <br/>Authorization: Bearer «real token»
+    A-->>K: response
+    K-->>C: JSON envelope (secrets scrubbed)
+    Note over C: never sees the token
+```
 
-## What it is
+## How it works
 
+A client calls `?op=<name>&…` over plain GET. The kernel (`kernel.mjs`) authenticates the
+request with the HMAC **door-key**, dispatches to the first matching **module**
+(`modules/*.mjs`), and the module injects a server-side credential the client never sees
+before forwarding the call through the kernel's single outbound-HTTPS proxy.
+
+- **Kernel-centred security.** Modules carry ZERO per-service policy. Every clamp —
+  auth, SSRF/proxy guards, exec RCE guards, secret scrubbing — lives in the kernel, in
+  three generic primitives (`core.proxy`, `core.exec`, `core.store`).
 - **Fetch-only.** Only `GET` and `HEAD` reach the kernel; every other method is
   `405 method_not_allowed`. A plain web-fetch chat is a first-class client.
-- **Signed.** Protected ops require the **door-key**: either a full HMAC-SHA256
-  signature (`sig`/`ts`/`nonce`) or a degraded `key=<door-key>` form for clients that
-  cannot compute an HMAC.
-- **Zero dependency.** Node ≥ 18 built-ins only (`node:http`, `node:crypto`,
-  `node:https`, `node:dns`, `node:child_process`, …). No `npm install`.
-- **Kernel-centred security.** Modules carry ZERO per-service policy. Every clamp
-  — auth, SSRF/proxy guards, exec RCE guards, secret scrubbing — lives in the kernel,
-  in three generic primitives (`core.proxy`, `core.exec`, `core.store`). A module only:
-  `match` → inject its env secret → call a `core.*` primitive.
 - **ASLEEP / ACTIVE.** With no door-key minted the bridge is **ASLEEP**: public ops
   answer, protected ops are rejected. `node server.mjs issue` mints a key → **ACTIVE**.
 
----
-
-## Requirements
-
-- A host with **Node.js ≥ 18** (`node --version`). Nothing else — zero npm deps.
-- Outbound HTTPS from that host to the APIs you want to reach (the proxy allowlist).
-- No secret is required to prove the mechanism works. GitHub / Telegram credentials are
-  **optional** add-ons; the bridge boots and serves public + `fetch`/`hash`/`secure_echo`
-  ops with no credential at all.
+`server.mjs` is BOTH the HTTP server and the operator CLI. For the full contract and
+threat model, see [`SPEC.md`](SPEC.md).
 
 ---
 
 ## Quickstart
 
+Requirements: **Node.js ≥ 18** and outbound HTTPS to the APIs you want to reach.
+Nothing else — no `npm install`, no credential needed to prove the mechanism works
+(GitHub / Telegram secrets are optional add-ons).
+
 ```bash
-git clone <repo-url>
+git clone https://github.com/list91/get-hub
 cd get-hub    # the repo root is the product — self-contained
 
 cp .env.example .env
@@ -59,10 +72,6 @@ node server.mjs issue          # mint the door-key — printed ONCE, copy it now
                                # (server.mjs loads ./.env itself — no `source .env` needed)
 node server.mjs                # start the server (prints the ASLEEP/ACTIVE banner)
 ```
-
-Both `server.mjs issue` and `server.mjs` (and `kill`/`show`) load `./.env` from the working
-directory themselves, so the CLI picks up `GITHUB_TOKEN` etc. with no `set -a; . ./.env` dance.
-A real environment variable always wins over `.env`.
 
 The startup banner (PORT here is whatever you set — default 8787):
 
@@ -89,6 +98,10 @@ curl "http://127.0.0.1:$PORT/?op=hash&s=hi"     # {"ok":false,"error":"no_sig"}
 KEY='bridge-...'
 curl "http://127.0.0.1:$PORT/?op=hash&s=hi&key=$KEY"
 ```
+
+Both `server.mjs issue` and `server.mjs` (and `kill`/`show`) load `./.env` from the working
+directory themselves, so the CLI picks up `GITHUB_TOKEN` etc. with no `set -a; . ./.env` dance.
+A real environment variable always wins over `.env`.
 
 For a persistent LAN deploy on a Raspberry Pi, see [`DEPLOY.md`](DEPLOY.md).
 
@@ -211,8 +224,8 @@ The `github` module targets `api.github.com`; the `telegram` daemon polls
 `api.telegram.org`. Both hosts must be in `ALLOW_HOSTS` for those modules to work (they
 are in the default allowlist).
 
-Non-module files in `modules/`: `_template.mjs`, `CONTRACT.md`, `_test_exec_modules.mjs`
-(helpers/docs, skipped by the loader).
+Write your own: start from [`modules/_template.mjs`](modules/_template.mjs) and the
+module contract in [`modules/CONTRACT.md`](modules/CONTRACT.md).
 
 ---
 
@@ -226,6 +239,9 @@ multi-word values like `ALLOW_HOSTS` need no quotes. All values below are read b
 `loadConfig` (globals) or by a module's `<NAME>_*` namespace. Per-module secrets are
 exposed to a module ONLY as its frozen `<NAME>_` view (e.g. `github` sees
 `GITHUB_TOKEN` as `env.TOKEN`); modules never read `process.env`.
+
+<details>
+<summary><b>Full variable reference</b> (defaults verified against <code>kernel.mjs</code>)</summary>
 
 | Var                 | Required?          | Default (code)         | Purpose                                                                 |
 |---------------------|--------------------|------------------------|-------------------------------------------------------------------------|
@@ -267,6 +283,8 @@ exposed to a module ONLY as its frozen `<NAME>_` view (e.g. `github` sees
 \* Operator identity vars are only needed if you use the Telegram operator trigger. Any
 `<VAR>_FILE=/path` (with `<VAR>` unset) is expanded to the file contents by the kernel at
 boot — a generic convention for large/multiline secrets, used above by `GITHUB_APP_PEM_FILE`.
+
+</details>
 
 See [`.env.example`](.env.example) for the full annotated list.
 
