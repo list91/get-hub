@@ -1,0 +1,20 @@
+[Unit]
+Description=bridge-mta universal node bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/bridge-mta-node
+EnvironmentFile=%h/bridge-mta-node/.env
+ExecStart=/usr/bin/node %h/bridge-mta-node/server.mjs
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/bridge-mta-node
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

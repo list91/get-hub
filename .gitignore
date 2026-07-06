@@ -1,0 +1,8 @@
+﻿# Cloudflare Worker build cache
+.wrangler/
+node_modules/
+
+# Local secrets — never commit
+php/config.php
+.dev.vars
+.env

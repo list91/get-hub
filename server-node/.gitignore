@@ -1,0 +1,4 @@
+bridge-store.json
+.env
+server.log
+node_modules/

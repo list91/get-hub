@@ -1,0 +1,10 @@
+name = "bridge-mta"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# KV namespace для nonce store (anti-replay)
+[[kv_namespaces]]
+binding = "NONCES"
+# Create your own namespace: `wrangler kv namespace create NONCES`
+# then paste the returned id here. The one below is a placeholder.
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
