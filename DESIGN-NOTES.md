@@ -104,4 +104,5 @@ module" library.
 
 ## Rename
 Repo `bridge-mta` → **`get-hub`**. The get-hub product now lives at the repo root
-(`github.com/list91/get-hub`); the old Worker + flat-port code is archived under `legacy/`.
+(`github.com/list91/get-hub`); the old Worker + flat-port code is preserved in the private
+backup repo `github.com/list91/bridge-mta-archive`.

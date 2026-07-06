@@ -229,7 +229,7 @@ exposed to a module ONLY as its frozen `<NAME>_` view (e.g. `github` sees
 
 | Var                 | Required?          | Default (code)         | Purpose                                                                 |
 |---------------------|--------------------|------------------------|-------------------------------------------------------------------------|
-| `PORT`              | no                 | `8787`                 | TCP port. If co-hosting multiple gateways on one host, give each a **unique** port (a `bridge-mta`-style service may already own 8787). |
+| `PORT`              | no                 | `8787`                 | TCP port. If co-hosting multiple gateways on one host, give each a **unique** port (another service may already own 8787). |
 | `BIND`              | no (set for LAN)   | `127.0.0.1`            | Bind address. Set to the Pi's **LAN IP**, never `0.0.0.0`.             |
 | `STORE_PATH`        | no                 | `./get-hub-store.json` | JSON store (door-key + module secrets), written `0600`.               |
 | `ALLOW_HOSTS`       | no                 | `api.github.com api.telegram.org` | Proxy host allowlist (space/comma sep). `core.proxy` refuses everything else. |

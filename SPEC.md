@@ -9,8 +9,9 @@ get-hub is a **fetch-only gateway**: one GET-only signed HTTPS URL routes to plu
 that claims it. Everything user-visible (`ping`, `info`, `do`, GitHub, demos) is a
 module. The kernel itself is small, fixed, and security-bearing.
 
-This SPEC generalizes the already-proven `legacy/server-node/server.mjs` (HMAC + `op=do` +
-GitHub injection, blind-deployed 3× on the Pi). We **refactor** that working code into
+This SPEC generalizes the already-proven original Node port (HMAC + `op=do` +
+GitHub injection, blind-deployed 3× on the Pi; preserved in `github.com/list91/bridge-mta-archive`).
+We **refactor** that working code into
 kernel + modules — we do not rewrite from scratch, and we do not weaken any guard that
 already passed.
 

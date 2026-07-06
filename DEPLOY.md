@@ -8,7 +8,7 @@ Everything below runs **over ssh** to a Raspberry Pi on your LAN. Requirements: 
 on the Pi (`node --version`) and its LAN IP (call it `PI_IP`, e.g. `192.168.0.101`).
 
 **Pick a `PORT` up front** (default `8787`). Examples below use `8788` so they don't collide
-with a `bridge-mta`-style service that may already own `8787`. Set the same value in `.env`.
+with another service that may already own `8787`. Set the same value in `.env`.
 Every `curl` below uses `$PORT` — export it in your shell first:
 
 ```bash
@@ -297,7 +297,7 @@ logs — I9 — but volume, not content, is the DoS concern here.)
 - **LAN-only by default.** Bind to `PI_IP`, never `0.0.0.0`. For public exposure follow the
   **"Public exposure (internet-facing)"** section above — proxy in front, `BIND` on the LAN IP.
 - **Unique port per gateway.** If you co-host multiple gateways on one host, each needs its
-  own `PORT` — a `bridge-mta`-style service may already own `8787`.
+  own `PORT` — another service may already own `8787`.
 - **`.env` is loaded by `server.mjs`,** for both the server and the CLI — no `EnvironmentFile`
   in the unit, no `source .env` before the CLI. Real/systemd-set env wins over `.env`.
 - **Store + `.env` are `0600`.** The door-key persists across restarts in
